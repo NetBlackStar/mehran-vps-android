@@ -1,0 +1,44 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.vpsmanager.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.vpsmanager.app'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // The UI and logic are shared with the Termux web version (../../www).
+    sourceSets {
+        main {
+            assets.srcDirs = ['../../www']
+        }
+    }
+
+    packaging {
+        resources {
+            excludes += ['META-INF/versions/**', 'META-INF/LICENSE*', 'META-INF/NOTICE*', 'META-INF/DEPENDENCIES']
+        }
+    }
+}
+
+dependencies {
+    implementation 'com.github.mwiede:jsch:0.2.20'
+}

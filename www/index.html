@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>مدیریت VPS</title>
+<style>
+  :root { --bg:#0f1419; --card:#1a212b; --line:#2a3441; --txt:#e6edf3; --mut:#8b98a8; --acc:#3b82f6; --ok:#22c55e; --bad:#ef4444; }
+  * { box-sizing: border-box; }
+  body { margin:0 auto; background:var(--bg); color:var(--txt); font:15px/1.5 system-ui,Tahoma,sans-serif; padding:16px; max-width:640px; }
+  h1 { font-size:20px; margin:4px 0 16px; }
+  h2 { font-size:14px; margin:0 0 10px; color:var(--mut); font-weight:600; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:14px; }
+  label { display:block; font-size:13px; color:var(--mut); margin:10px 0 4px; }
+  input[type=text], input[type=password], select { width:100%; padding:10px; border-radius:8px; border:1px solid var(--line); background:#0f1419; color:var(--txt); font-size:15px; }
+  input.ltr { direction:ltr; text-align:left; }
+  button { padding:10px 14px; border:0; border-radius:8px; background:var(--acc); color:#fff; font-size:15px; cursor:pointer; margin-top:10px; }
+  button.sec { background:#2a3441; }
+  button.bad { background:var(--bad); }
+  button:disabled { opacity:.5; }
+  .row { display:flex; gap:8px; }
+  .row > div { flex:1; min-width:0; }
+  .chk { display:flex; align-items:center; gap:8px; margin-top:12px; font-size:14px; }
+  .chk input { width:auto; }
+  .srv { border-top:1px solid var(--line); padding-top:10px; margin-top:10px; }
+  .srv:first-child { border-top:0; margin-top:0; padding-top:0; }
+  .ip { font-family:ui-monospace,monospace; font-size:17px; color:var(--ok); direction:ltr; text-align:right; }
+  pre { direction:ltr; text-align:left; background:#0f1419; border:1px solid var(--line); border-radius:8px; padding:10px; overflow:auto; font-size:12px; white-space:pre-wrap; word-break:break-all; max-height:260px; }
+  .msg { padding:10px; border-radius:8px; margin-top:10px; font-size:14px; white-space:pre-wrap; }
+  .msg.err { background:#3a1618; color:#fca5a5; }
+  .msg.info { background:#142235; color:#9cc3ff; }
+  .mut { color:var(--mut); font-size:13px; }
+  .hide { display:none; }
+</style>
+</head>
+<body>
+<h1>مدیریت VPS مهران‌هاست</h1>
+
+<div class="card">
+  <h2>۱. کلید API</h2>
+  <div id="acct" class="mut"></div>
+  <label>کلید را وارد کنید یا از فایل انتخاب کنید</label>
+  <input id="key" type="password" class="ltr" autocomplete="off" placeholder="mh_...">
+  <div class="row">
+    <div><button onclick="saveKey()" style="width:100%">ذخیره کلید</button></div>
+    <div><button class="sec" onclick="$('keyfile').click()" style="width:100%">انتخاب از فایل</button></div>
+  </div>
+  <input id="keyfile" type="file" class="hide" onchange="keyFromFile(this)">
+</div>
+
+<div class="card">
+  <h2>۲. ساخت سرور</h2>
+  <div class="row">
+    <div><label>موقعیت</label><select id="loc" onchange="renderPlans()"></select></div>
+    <div><label>سیستم‌عامل</label><select id="img"></select></div>
+  </div>
+  <label>پلن</label>
+  <select id="plan"></select>
+  <label>رمز روت (۸ تا ۶۴ کاراکتر انگلیسی، حداقل سه مورد از: حرف بزرگ، کوچک، عدد، نماد)</label>
+  <input id="pw" type="password" class="ltr" autocomplete="new-password">
+  <label>نام سرور</label>
+  <input id="label" type="text" class="ltr" placeholder="my-vps">
+  <div class="chk"><input type="checkbox" id="isDef"><span>ذخیره به‌عنوان پیش‌فرض (موقعیت، پلن، سیستم‌عامل، رمز روت و نام سرور)</span></div>
+  <div class="mut" id="defNote"></div>
+  <div class="chk"><input type="checkbox" id="awg" checked><span>بعد از ساخت، AmneziaWG نصب شود (Ubuntu توصیه می‌شود)</span></div>
+  <button id="createBtn" onclick="createVps()">ساخت سرور</button>
+  <div id="job"></div>
+</div>
+
+<div class="card">
+  <h2>۳. سرورهای من</h2>
+  <button class="sec" style="margin:0 0 10px" onclick="loadServers()">بازخوانی</button>
+  <div id="servers" class="mut">...</div>
+</div>
+
+<script src="core.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+// ---------- transports ----------
+function androidTransport() {
+  const pending = {}; let n = 0;
+  window.__cb = (id, json) => { const p = pending[id]; if (p) { delete pending[id]; p(JSON.parse(json)); } };
+  const call = fn => new Promise(res => { const id = 'c' + (++n); pending[id] = res; fn(id); });
+  return {
+    get: k => window.Native.get(k) || null,
+    put: (k, v) => window.Native.put(k, v),
+    http: async (m, url, h, body) => {
+      const r = await call(id => window.Native.http(id, m, url, JSON.stringify(h || {}), body || ''));
+      if (r.error) throw new Error(r.error);
+      return r;
+    },
+    ssh: async (host, user, pw, script) => {
+      const r = await call(id => window.Native.ssh(id, host, user, pw, script));
+      if (r.error) throw new Error(r.error);
+      return r;
+    },
+  };
+}
+function webTransport() {
+  const post = async (path, body) => {
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    return d;
+  };
+  return {
+    get: k => localStorage.getItem('vpsm_' + k),
+    put: (k, v) => localStorage.setItem('vpsm_' + k, v),
+    http: (method, url, headers, body) => post('/native/http', { method, url, headers, body }),
+    ssh: (host, user, password, script) => post('/native/ssh', { host, user, password, script }),
+  };
+}
+const T = window.Native ? androidTransport() : webTransport();
+const core = VpsCore.Core(T);
+
+let OPT = null, DEF = null;
+function show(el, text, cls) { el.innerHTML = '<div class="msg ' + cls + '"></div>'; el.firstChild.textContent = text; }
+const fmt = n => Number(n).toLocaleString('fa-IR');
+
+async function init() {
+  DEF = core.getDefaults();
+  if (DEF) { $('pw').value = DEF.password || ''; $('label').value = DEF.label || ''; $('defNote').textContent = 'رمز روت و نام پیش‌فرض ذخیره شده‌اند (روی همین دستگاه).'; }
+  if (!core.hasKey()) { $('acct').textContent = 'هنوز کلیدی ذخیره نشده است.'; return; }
+  try {
+    const a = await core.account();
+    $('acct').textContent = 'موجودی کیف پول: ' + fmt(a.balance) + ' ' + a.currency;
+  } catch (e) { show($('acct'), e.message, 'err'); }
+  try { await loadOptions(); } catch (e) { show($('job'), e.message, 'err'); }
+  loadServers();
+}
+
+function saveKey() {
+  try { core.setKey($('key').value); $('key').value = ''; init(); } catch (e) { alert(e.message); }
+}
+function keyFromFile(inp) {
+  const f = inp.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = () => { try { core.setKey(String(r.result)); init(); } catch (e) { alert(e.message); } };
+  r.readAsText(f);
+}
+
+async function loadOptions() {
+  OPT = await core.options();
+  $('loc').innerHTML = OPT.locations.map(l => `<option value="${l.name}">${l.description || l.city || l.name} (${l.name})</option>`).join('');
+  $('img').innerHTML = OPT.images.map(i => `<option value="${i.id}">${i.name || i.description || i.id}</option>`).join('');
+  $('img').value = (DEF && DEF.image) || OPT.default_image;
+  if (DEF && DEF.location) $('loc').value = DEF.location;
+  renderPlans();
+}
+
+function renderPlans() {
+  const loc = $('loc').value, sel = $('plan');
+  sel.innerHTML = '';
+  (OPT.plans || []).forEach(p => {
+    const l = (p.locations || []).find(x => x.location === loc);
+    if (!l || !l.available) return;
+    const h = l.prices.default.hourly;
+    const o = document.createElement('option');
+    o.value = p.name;
+    o.textContent = `${p.description || p.name} - ${p.cores} هسته، ${p.memory_gb}GB رم، ${p.disk_gb}GB - ساعتی ${fmt(h)}` +
+      (OPT.hours_per_month ? ` (ماهانه ≈ ${fmt(h * OPT.hours_per_month)})` : '') +
+      (DEF && DEF.plan === p.name && DEF.location === loc ? ' ★' : '');
+    sel.appendChild(o);
+  });
+  if (DEF && DEF.plan && [...sel.options].some(o => o.value === DEF.plan)) sel.value = DEF.plan;
+  if (!sel.options.length) sel.innerHTML = '<option value="">پلن موجودی در این موقعیت نیست</option>';
+}
+
+async function createVps() {
+  const btn = $('createBtn'); btn.disabled = true;
+  const d = { plan: $('plan').value, location: $('loc').value, image: $('img').value,
+              password: $('pw').value, label: $('label').value.trim(), awg: $('awg').checked };
+  const logs = [];
+  const log = m => { logs.push(m); show($('job'), logs.join('\n'), 'info'); };
+  try {
+    const err = core.checkPassword(d.password);
+    if (err) throw new Error(err);
+    if ($('isDef').checked) {
+      DEF = { plan: d.plan, location: d.location, image: d.image, password: d.password, label: d.label };
+      core.setDefaults(DEF);
+      $('defNote').textContent = 'رمز روت و نام پیش‌فرض ذخیره شدند (روی همین دستگاه).';
+      renderPlans();
+    }
+    const r = await core.provision(d, log);
+    log('تمام شد. آی‌پی: ' + r.ip);
+  } catch (e) { show($('job'), logs.concat(['خطا: ' + e.message]).join('\n'), 'err'); }
+  btn.disabled = false;
+  loadServers();
+}
+
+async function copyText(t) {
+  try { if (window.Native && window.Native.copy) window.Native.copy(t); else await navigator.clipboard.writeText(t); alert('کپی شد.'); }
+  catch (e) { alert('کپی ممکن نشد.'); }
+}
+function saveConf(name, text) {
+  if (window.Native && window.Native.share) return window.Native.share(name + '.conf', text);
+  const x = document.createElement('a'); x.href = URL.createObjectURL(new Blob([text])); x.download = name + '.conf'; x.click();
+}
+
+async function loadServers() {
+  const box = $('servers');
+  if (!core.hasKey()) { box.textContent = 'ابتدا کلید API را ذخیره کنید.'; return; }
+  try {
+    const list = (await core.servers()).filter(s => s.status !== 'deleted');
+    if (!list.length) { box.textContent = 'سروری وجود ندارد.'; return; }
+    box.innerHTML = '';
+    list.forEach(s => {
+      const d = document.createElement('div'); d.className = 'srv';
+      d.innerHTML = '<div><b></b> <span class="mut"></span></div><div class="ip"></div><div class="actions"></div>';
+      d.querySelector('b').textContent = s.label || 'server';
+      d.querySelector('.mut').textContent = `#${s.id} · ${s.plan} · ${s.location} · ${s.status}/${s.power || ''}`;
+      d.querySelector('.ip').textContent = s.ipv4 || '—';
+      const a = d.querySelector('.actions');
+      const mk = (txt, cls, fn) => { const b = document.createElement('button'); b.className = cls; b.textContent = txt; b.onclick = fn; return b; };
+      if (s.awg) {
+        const pre = document.createElement('pre'); pre.className = 'hide'; pre.textContent = s.awg;
+        a.append(mk('نمایش کانفیگ AmneziaWG', 'sec', () => pre.classList.toggle('hide')), ' ',
+                 mk('کپی', 'sec', () => copyText(s.awg)), ' ',
+                 mk('ذخیره/اشتراک .conf', 'sec', () => saveConf(s.label || 'awg', s.awg)), pre);
+      } else if (s.status === 'active' && s.ipv4) {
+        a.append(mk('نصب AmneziaWG', 'sec', async () => {
+          const pw = prompt('رمز روت این سرور:', (DEF && DEF.password) || ''); if (!pw) return;
+          const logs = []; const log = m => { logs.push(m); show($('job'), logs.join('\n'), 'info'); };
+          try { await core.awgOnly(s.id, s.ipv4, pw, log); log('AmneziaWG نصب شد.'); } catch (e) { show($('job'), e.message, 'err'); }
+          loadServers();
+        }));
+      }
+      a.append(' ', mk('حذف سرور', 'bad', async () => {
+        if (!confirm('سرور ' + (s.ipv4 || s.id) + ' برای همیشه حذف شود؟ این کار برگشت‌پذیر نیست.')) return;
+        try { await core.remove(s.id); loadServers(); } catch (e) { alert(e.message); }
+      }));
+      box.appendChild(d);
+    });
+  } catch (e) { show(box, e.message, 'err'); }
+}
+
+init();
+</script>
+</body>
+</html>
