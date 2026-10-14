@@ -110,11 +110,12 @@
       return `
 set -e
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y software-properties-common curl iptables
+APT="apt-get -o DPkg::Lock::Timeout=300"
+$APT update -y
+$APT install -y software-properties-common curl iptables
 add-apt-repository -y ppa:amnezia/ppa
-apt-get update -y
-apt-get install -y amneziawg amneziawg-tools
+$APT update -y
+$APT install -y amneziawg amneziawg-tools
 mkdir -p /etc/amnezia/amneziawg && cd /etc/amnezia/amneziawg
 umask 077
 awg genkey | tee srv.key | awg pubkey > srv.pub
@@ -186,11 +187,35 @@ EOF
       throw new ApiError('SSH در دسترس نشد: ' + last.slice(0, 200), 'ssh_timeout');
     }
 
+    // Runs first, right after the server accepts SSH and before AmneziaWG:
+    // makes sure openssh-server is installed, enabled at boot and running.
+    const SSHD_SCRIPT = `
+set -e
+export DEBIAN_FRONTEND=noninteractive
+# let first-boot tasks (cloud-init / unattended upgrades) release the apt lock
+timeout 300 cloud-init status --wait >/dev/null 2>&1 || true
+APT="apt-get -o DPkg::Lock::Timeout=300"
+$APT update -y
+$APT install -y openssh-server
+systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
+systemctl start ssh 2>/dev/null || systemctl start sshd 2>/dev/null || true
+if systemctl is-active --quiet ssh || systemctl is-active --quiet sshd; then echo SSHD_OK; else echo SSHD_FAILED; exit 1; fi
+`;
+
+    async function ensureSshd(ip, pw, log) {
+      log('نصب و فعال‌سازی سرویس sshd...');
+      const r = await T.ssh(ip, 'root', pw, SSHD_SCRIPT);
+      if (r.code !== 0 || r.out.indexOf('SSHD_OK') < 0)
+        throw new ApiError('نصب/فعال‌سازی sshd ناموفق بود:\n' + (r.err || r.out).slice(-600), 'sshd_failed');
+      log('sshd آماده است.');
+    }
+
     async function installAwg(ip, pw, log) {
       const p = { port: rnd(20000, 60000), jc: rnd(4, 12), s1: rnd(15, 150), s2: rnd(15, 150),
                   h1: rnd(5, 2 ** 31), h2: rnd(5, 2 ** 31), h3: rnd(5, 2 ** 31), h4: rnd(5, 2 ** 31), ip };
       while (p.s1 + 56 === p.s2) p.s2 = rnd(15, 150);
       await waitSsh(ip, pw, log);
+      await ensureSshd(ip, pw, log);
       log('در حال نصب AmneziaWG (چند دقیقه طول می‌کشد)...');
       const r = await T.ssh(ip, 'root', pw, awgScript(p));
       if (r.code !== 0 || r.out.indexOf('=====CLIENT=====') < 0)
