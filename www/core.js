@@ -197,13 +197,37 @@ timeout 300 cloud-init status --wait >/dev/null 2>&1 || true
 APT="apt-get -o DPkg::Lock::Timeout=300"
 $APT update -y
 $APT install -y openssh-server
+mkdir -p /run/sshd
+CFG=/etc/ssh/sshd_config
+cp -n $CFG $CFG.vpsm.bak 2>/dev/null || true
+# Put the two options at the very top: sshd uses the first value it sees, so
+# this also wins over drop-ins in sshd_config.d (e.g. cloud-init's).
+sed -i '/^# vpsm-begin$/,/^# vpsm-end$/d' $CFG
+{ echo '# vpsm-begin'; echo 'PermitRootLogin yes'; echo 'PasswordAuthentication yes'; echo '# vpsm-end'; cat $CFG; } > $CFG.new
+cat $CFG.new > $CFG
+rm -f $CFG.new
+if ! /usr/sbin/sshd -t; then
+  cp $CFG.vpsm.bak $CFG
+  echo SSHD_FAILED
+  exit 1
+fi
 systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
-systemctl start ssh 2>/dev/null || systemctl start sshd 2>/dev/null || true
+if systemctl is-active --quiet ssh || systemctl is-active --quiet sshd; then
+  systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+else
+  systemctl start ssh 2>/dev/null || systemctl start sshd 2>/dev/null || true
+fi
+EFF=$(/usr/sbin/sshd -T 2>/dev/null | grep -Ei '^(permitrootlogin|passwordauthentication) ' | tr '\\n' ' ')
+echo "$EFF"
+if ! { echo "$EFF" | grep -qi 'permitrootlogin yes' && echo "$EFF" | grep -qi 'passwordauthentication yes'; }; then
+  echo SSHD_CONFIG_NOT_APPLIED
+  exit 1
+fi
 if systemctl is-active --quiet ssh || systemctl is-active --quiet sshd; then echo SSHD_OK; else echo SSHD_FAILED; exit 1; fi
 `;
 
     async function ensureSshd(ip, pw, log) {
-      log('نصب و فعال‌سازی سرویس sshd...');
+      log('نصب و فعال‌سازی sshd (PermitRootLogin و PasswordAuthentication روی yes)...');
       const r = await T.ssh(ip, 'root', pw, SSHD_SCRIPT);
       if (r.code !== 0 || r.out.indexOf('SSHD_OK') < 0)
         throw new ApiError('نصب/فعال‌سازی sshd ناموفق بود:\n' + (r.err || r.out).slice(-600), 'sshd_failed');
