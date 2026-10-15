@@ -64,6 +64,7 @@
   <div class="mut" id="defNote"></div>
   <div class="chk"><input type="checkbox" id="awg" checked><span>بعد از ساخت، AmneziaWG نصب شود (Ubuntu توصیه می‌شود)</span></div>
   <button id="createBtn" onclick="createVps()">ساخت سرور</button>
+  <button class="sec" onclick="downloadSshLog()">دانلود لاگ SSH</button>
   <div id="job"></div>
 </div>
 
@@ -92,12 +93,12 @@ function androidTransport() {
     },
     ssh: async (host, user, pw, script) => {
       const r = await call(id => window.Native.ssh(id, host, user, pw || '', script));
-      if (r.error) throw new Error(r.error);
+      if (r.error) { const e = new Error(r.error); e.log = r.log; throw e; }
       return r;
     },
     copyId: async (host, user, pw) => {
       const r = await call(id => window.Native.copyId(id, host, user, pw));
-      if (r.error) throw new Error(r.error);
+      if (r.error) { const e = new Error(r.error); e.log = r.log; throw e; }
       return r;
     },
   };
@@ -106,7 +107,7 @@ function webTransport() {
   const post = async (path, body) => {
     const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const d = await r.json();
-    if (d.error) throw new Error(d.error);
+    if (d.error) { const e = new Error(d.error); e.log = d.log; throw e; }
     return d;
   };
   return {
@@ -198,6 +199,12 @@ async function createVps() {
 async function copyText(t) {
   try { if (window.Native && window.Native.copy) window.Native.copy(t); else await navigator.clipboard.writeText(t); alert('کپی شد.'); }
   catch (e) { alert('کپی ممکن نشد.'); }
+}
+function downloadSshLog() {
+  const text = core.getSshLog();
+  if (!text) { alert('هنوز لاگ SSH ثبت نشده است.'); return; }
+  if (window.Native && window.Native.saveFile) return window.Native.saveFile('ssh-log.txt', text);
+  const x = document.createElement('a'); x.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); x.download = 'ssh-log.txt'; x.click();
 }
 function saveConf(name, text) {
   if (window.Native && window.Native.share) return window.Native.share(name + '.conf', text);

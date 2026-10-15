@@ -1,8 +1,9 @@
 // Shared logic for the web (Termux) and Android versions.
 // Everything platform specific goes through the transport T:
 //   T.http(method, url, headers, body) -> {status, headers, body}   (body is text)
-//   T.ssh(host, user, password, script) -> {code, out, err}   (password '' = use the saved SSH key)
-//   T.copyId(host, user, password) -> {code, out, err}         (ssh-keygen + ssh-copy-id)
+//   T.ssh(host, user, password, script) -> {code, out, err, log?}   (password '' = use the saved SSH key;
+//                                                                    on connection errors it throws an Error with .log)
+//   T.copyId(host, user, password) -> {code, out, err, log?}   (ssh-keygen + ssh-copy-id)
 //   T.get(key) -> string|null     T.put(key, value)
 (function (root) {
   const BASE = 'https://www.mehranhost.cloud/api/v1';
@@ -173,44 +174,84 @@ EOF
 `;
     }
 
-    async function waitSsh(ip, pw, log) {
+    // ---------- SSH log (downloadable as a file from the UI) ----------
+    let sshLog = [];
+    const logSsh = m => { sshLog.push('[' + new Date().toISOString() + '] ' + m); };
+    const saveSshLog = () => { try { if (sshLog.length) T.put('sshlog', sshLog.join('\n').slice(-300000)); } catch (e) {} };
+    const getSshLog = () => (sshLog.length ? sshLog.join('\n') + '\n' : (T.get('sshlog') || ''));
+    const clearSshLog = () => { sshLog = []; };
+
+    // One SSH command. secret = root password, or '' to log in with the saved key.
+    // Every attempt is written to the SSH log (never the password or the script's stdout,
+    // except for the harmless connection test).
+    async function sshRun(ip, secret, script, label, showOut) {
+      logSsh('>>> ' + label + ' | method=' + (secret ? 'password' : 'key') + ' | root@' + ip + ':22');
+      let r;
+      try { r = await T.ssh(ip, 'root', secret, script); }
+      catch (e) {
+        logSsh('FAILED: ' + (e.message || e));
+        if (e.log) logSsh('--- ssh debug ---\n' + e.log);
+        saveSshLog();
+        throw e;
+      }
+      logSsh('exit code=' + r.code);
+      if (showOut && r.out) logSsh('stdout: ' + r.out.trim().slice(-300));
+      if (r.err) logSsh('stderr: ' + r.err.slice(-1500));
+      if (r.log) logSsh('--- ssh debug ---\n' + r.log);
+      saveSshLog();
+      return r;
+    }
+
+    // Connects first with the root password; if that fails, with the saved SSH key.
+    // Returns the secret to use for the next commands ('' means key).
+    async function connect(ip, pw, log) {
       const end = Date.now() + 300000;
       let last = '';
       while (Date.now() < end) {
         try {
-          const r = await T.ssh(ip, 'root', pw, 'echo ok');
-          if (r.code === 0 && /ok/.test(r.out)) return;
-          last = r.err || '';
-        } catch (e) { last = String(e.message || e); }
+          const r = await sshRun(ip, pw, 'echo ok', 'test password login', true);
+          if (r.code === 0 && /ok/.test(r.out)) { log('اتصال SSH با رمز برقرار شد.'); return pw; }
+          last = 'password: ' + (r.err || 'exit ' + r.code);
+        } catch (e) { last = 'password: ' + String(e.message || e); }
+        log('ورود با رمز ممکن نشد؛ تلاش با کلید SSH...');
+        try {
+          const r = await sshRun(ip, '', 'echo ok', 'test key login', true);
+          if (r.code === 0 && /ok/.test(r.out)) { log('اتصال SSH با کلید برقرار شد.'); return ''; }
+          last += ' | key: ' + (r.err || 'exit ' + r.code);
+        } catch (e) { last += ' | key: ' + String(e.message || e); }
         log('منتظر SSH...');
         await sleep(8000);
       }
-      throw new ApiError('SSH در دسترس نشد: ' + last.slice(0, 200), 'ssh_timeout');
+      throw new ApiError('SSH نه با رمز و نه با کلید در دسترس نشد: ' + last.slice(0, 300) +
+                         '\n(فایل لاگ SSH را با دکمه «دانلود لاگ SSH» بگیرید.)', 'ssh_timeout');
     }
 
-    // ssh-copy-id: creates (once) an SSH key pair on this device and appends its
-    // public key to /root/.ssh/authorized_keys on the server using the root password.
-    // From then on every command is run with the key (empty password = key auth),
-    // so nothing in sshd_config has to be changed on the server.
-    async function setupKey(ip, pw, log) {
-      log('ساخت کلید SSH و نصب آن روی سرور (ssh-copy-id)...');
-      const r = await T.copyId(ip, 'root', pw);
-      if (r.code !== 0)
-        throw new ApiError('ssh-copy-id ناموفق بود:\n' + (r.err || r.out || '').slice(-600), 'copyid_failed');
-      const t = await T.ssh(ip, 'root', '', 'echo ok');
-      if (t.code !== 0 || !/ok/.test(t.out))
-        throw new ApiError('ورود با کلید SSH ناموفق بود:\n' + (t.err || t.out || '').slice(-400), 'key_login_failed');
-      log('ورود با کلید SSH برقرار شد.');
+    // ssh-copy-id: creates (once) an SSH key on this device and appends its public key to
+    // /root/.ssh/authorized_keys. Best effort: it only enables the key fallback for later.
+    async function installKey(ip, pw, log) {
+      logSsh('>>> ssh-copy-id | auth=password | root@' + ip);
+      try {
+        const r = await T.copyId(ip, 'root', pw);
+        logSsh('ssh-copy-id exit code=' + r.code);
+        if (r.err) logSsh('stderr: ' + r.err.slice(-1500));
+        if (r.log) logSsh('--- ssh debug ---\n' + r.log);
+        log(r.code === 0 ? 'کلید SSH روی سرور نصب شد (برای اتصال‌های بعدی).' : 'نصب کلید SSH ناموفق بود (ادامه با رمز).');
+      } catch (e) {
+        logSsh('ssh-copy-id FAILED: ' + (e.message || e));
+        log('نصب کلید SSH ناموفق بود (ادامه با رمز).');
+      }
+      saveSshLog();
     }
 
     async function installAwg(ip, pw, log) {
+      clearSshLog();
       const p = { port: rnd(20000, 60000), jc: rnd(4, 12), s1: rnd(15, 150), s2: rnd(15, 150),
                   h1: rnd(5, 2 ** 31), h2: rnd(5, 2 ** 31), h3: rnd(5, 2 ** 31), h4: rnd(5, 2 ** 31), ip };
       while (p.s1 + 56 === p.s2) p.s2 = rnd(15, 150);
-      await waitSsh(ip, pw, log);
-      await setupKey(ip, pw, log);
+      const auth = await connect(ip, pw, log);
+      if (auth) await installKey(ip, pw, log);
       log('در حال نصب AmneziaWG (چند دقیقه طول می‌کشد)...');
-      const r = await T.ssh(ip, 'root', '', awgScript(p));
+      const r = await sshRun(ip, auth, awgScript(p), 'install AmneziaWG');
       if (r.code !== 0 || r.out.indexOf('=====CLIENT=====') < 0)
         throw new ApiError('نصب AmneziaWG ناموفق بود:\n' + (r.err || r.out).slice(-800), 'awg_failed');
       return r.out.split('=====CLIENT=====')[1].trim() + '\n';
@@ -252,7 +293,7 @@ EOF
     }
 
     return { api, checkPassword, hasKey, setKey, getDefaults, setDefaults, getAwg, account, options, servers,
-             remove, provision, awgOnly, waitActive, installAwg };
+             remove, provision, awgOnly, waitActive, installAwg, getSshLog };
   }
 
   root.VpsCore = { Core, ApiError };

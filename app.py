@@ -7,11 +7,11 @@ This server only serves those files and provides two helpers the browser cannot 
   POST /native/copyid -> creates an SSH key (ssh-keygen) and installs it on the server
                          with ssh-copy-id (needs `pkg install openssh sshpass`)
   POST /native/ssh    -> runs a script as root over SSH using that key
-                         (empty password = key auth; paramiko is used if installed)
+                         (password first; empty password = saved key)
 
 Run:  python app.py     then open http://127.0.0.1:8080
 """
-import json, os, shutil, subprocess, sys
+import json, os, shutil, subprocess, sys, tempfile
 import urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -59,39 +59,43 @@ def ensure_key():
 
 
 def copy_id(d):
+    """ssh-copy-id: appends our public key to ~/.ssh/authorized_keys (login with the password)."""
     host, user, pw = d["host"], d.get("user", "root"), d["password"]
     ensure_key()
     if not (shutil.which("sshpass") and shutil.which("ssh-copy-id")):
         raise RuntimeError("Install: pkg install openssh sshpass")
-    # ssh-copy-id: appends the public key to ~/.ssh/authorized_keys on the server
     p = subprocess.run(
-        ["sshpass", "-p", pw, "ssh-copy-id", "-i", KEY + ".pub"] + SSH_OPTS + [f"{user}@{host}"],
+        ["sshpass", "-p", pw, "ssh-copy-id", "-i", KEY + ".pub",
+         "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no"] + SSH_OPTS + [f"{user}@{host}"],
         capture_output=True, text=True, timeout=120)
-    return {"code": p.returncode, "out": p.stdout, "err": p.stderr}
+    return {"code": p.returncode, "out": p.stdout, "err": p.stderr, "log": ""}
 
 
 def ssh(d):
-    host, user, script = d["host"], d.get("user", "root"), d["script"]
-    ensure_key()
+    """Runs a script on the server. Non-empty password -> password login, empty -> saved key.
+    `log` carries the verbose ssh client log (ssh -v) for the SSH log file."""
+    host, user, pw, script = d["host"], d.get("user", "root"), d.get("password") or "", d["script"]
+    if pw:
+        if not shutil.which("sshpass"):
+            raise RuntimeError("Install: pkg install openssh sshpass")
+        cmd = ["sshpass", "-p", pw, "ssh", "-o", "PreferredAuthentications=password,keyboard-interactive",
+               "-o", "PubkeyAuthentication=no"]
+    else:
+        ensure_key()
+        cmd = ["ssh", "-i", KEY, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no"]
+    fd, logfile = tempfile.mkstemp(prefix="vpsm-ssh-", suffix=".log")
+    os.close(fd)
     try:
-        import paramiko  # type: ignore
-    except ImportError:
-        paramiko = None
-    if paramiko:
-        cl = paramiko.SSHClient()
-        cl.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        cl.connect(host, username=user, key_filename=KEY, timeout=30, allow_agent=False, look_for_keys=False)
-        stdin, stdout, stderr = cl.exec_command("bash -s", timeout=900)
-        stdin.write(script)
-        stdin.channel.shutdown_write()
-        out, err = stdout.read().decode(), stderr.read().decode()
-        code = stdout.channel.recv_exit_status()
-        cl.close()
-        return {"code": code, "out": out, "err": err}
-    p = subprocess.run(
-        ["ssh", "-i", KEY, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes"] + SSH_OPTS + [f"{user}@{host}", "bash -s"],
-        input=script, capture_output=True, text=True, timeout=900)
-    return {"code": p.returncode, "out": p.stdout, "err": p.stderr}
+        p = subprocess.run(cmd + ["-v", "-E", logfile] + SSH_OPTS + [f"{user}@{host}", "bash -s"],
+                           input=script, capture_output=True, text=True, timeout=900)
+        with open(logfile, "r", errors="replace") as fh:
+            log = fh.read()
+    finally:
+        try:
+            os.remove(logfile)
+        except OSError:
+            pass
+    return {"code": p.returncode, "out": p.stdout, "err": p.stderr, "log": log}
 
 
 class H(BaseHTTPRequestHandler):

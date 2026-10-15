@@ -17,10 +17,12 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.widget.EditText;
+import android.widget.Toast;
 
 import com.jcraft.jsch.ChannelExec;
 import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.KeyPair;
+import com.jcraft.jsch.Logger;
 import com.jcraft.jsch.Session;
 
 import org.json.JSONException;
@@ -47,10 +49,25 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
     private static final String API_PREFIX = "https://www.mehranhost.cloud/api/v1/";
     private static final int REQ_FILE = 1;
+    private static final int REQ_SAVE = 2;
+
+    /** JSch debug output of the current SSH call; returned to the page for the SSH log file. */
+    private static final StringBuffer JSCH_LOG = new StringBuffer();
+    private static final String[] LEVELS = {"DEBUG", "INFO", "WARN", "ERROR", "FATAL"};
+    private String pendingSave;
 
     private WebView webView;
     private ValueCallback<Uri[]> filePathCallback;
     private final ExecutorService pool = Executors.newCachedThreadPool();
+
+    static {
+        JSch.setLogger(new Logger() {
+            @Override public boolean isEnabled(int level) { return true; }
+            @Override public void log(int level, String message) {
+                JSCH_LOG.append(LEVELS[Math.max(0, Math.min(level, 4))]).append(": ").append(message).append('\n');
+            }
+        });
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -123,6 +140,17 @@ public class MainActivity extends Activity {
             }
             filePathCallback.onReceiveValue(r);
             filePathCallback = null;
+        } else if (requestCode == REQ_SAVE) {
+            String text = pendingSave;
+            pendingSave = null;
+            if (resultCode == RESULT_OK && data != null && data.getData() != null && text != null) {
+                try (OutputStream os = getContentResolver().openOutputStream(data.getData())) {
+                    os.write(text.getBytes(StandardCharsets.UTF_8));
+                    Toast.makeText(this, "ذخیره شد", Toast.LENGTH_SHORT).show();
+                } catch (Exception e) {
+                    Toast.makeText(this, "ذخیره ممکن نشد: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                }
+            }
         } else {
             super.onActivityResult(requestCode, resultCode, data);
         }
@@ -148,7 +176,8 @@ public class MainActivity extends Activity {
 
     private static String errorJson(Exception e) {
         try {
-            return new JSONObject().put("error", String.valueOf(e.getMessage())).toString();
+            return new JSONObject().put("error", String.valueOf(e.getMessage()))
+                    .put("log", JSCH_LOG.toString()).toString();
         } catch (JSONException x) {
             return "{\"error\":\"error\"}";
         }
@@ -262,12 +291,31 @@ public class MainActivity extends Activity {
             return new String(out.toByteArray(), StandardCharsets.UTF_8);
         }
 
+        /** Lets the user save a text file (e.g. the SSH log) anywhere via the system file picker. */
+        @JavascriptInterface
+        public void saveFile(final String name, final String text) {
+            runOnUiThread(() -> {
+                pendingSave = text;
+                Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("text/plain");
+                i.putExtra(Intent.EXTRA_TITLE, name);
+                try {
+                    startActivityForResult(i, REQ_SAVE);
+                } catch (Exception e) {
+                    pendingSave = null;
+                    Toast.makeText(MainActivity.this, "ذخیره ممکن نشد: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                }
+            });
+        }
+
         /** ssh-copy-id: logs in with the password and appends our public key to authorized_keys. */
         @JavascriptInterface
         public void copyId(final String id, final String host, final String user, final String password) {
             pool.execute(() -> {
                 String result;
                 Session session = null;
+                JSCH_LOG.setLength(0);
                 try {
                     String pub = ensureKey()[1];
                     JSch jsch = new JSch();
@@ -284,7 +332,8 @@ public class MainActivity extends Activity {
                     int[] code = new int[1];
                     StringBuilder err = new StringBuilder();
                     String out = runExec(session, "bash -s", script, code, err);
-                    result = new JSONObject().put("code", code[0]).put("out", out).put("err", err.toString()).toString();
+                    result = new JSONObject().put("code", code[0]).put("out", out).put("err", err.toString())
+                            .put("log", JSCH_LOG.toString()).toString();
                 } catch (Exception e) {
                     result = errorJson(e);
                 } finally {
@@ -294,13 +343,14 @@ public class MainActivity extends Activity {
             });
         }
 
-        /** Runs a script as root. An empty password means: log in with the saved SSH key. */
+        /** Runs a script as root. Non-empty password = password login; empty = saved SSH key. */
         @JavascriptInterface
         public void ssh(final String id, final String host, final String user,
                         final String password, final String script) {
             pool.execute(() -> {
                 String result;
                 Session session = null;
+                JSCH_LOG.setLength(0);
                 try {
                     JSch jsch = new JSch();
                     boolean useKey = password == null || password.isEmpty();
@@ -317,7 +367,8 @@ public class MainActivity extends Activity {
                     int[] code = new int[1];
                     StringBuilder err = new StringBuilder();
                     String out = runExec(session, "bash -s", script, code, err);
-                    result = new JSONObject().put("code", code[0]).put("out", out).put("err", err.toString()).toString();
+                    result = new JSONObject().put("code", code[0]).put("out", out).put("err", err.toString())
+                            .put("log", JSCH_LOG.toString()).toString();
                 } catch (Exception e) {
                     result = errorJson(e);
                 } finally {
