@@ -1,7 +1,8 @@
 // Shared logic for the web (Termux) and Android versions.
 // Everything platform specific goes through the transport T:
 //   T.http(method, url, headers, body) -> {status, headers, body}   (body is text)
-//   T.ssh(host, user, password, script) -> {code, out, err}
+//   T.ssh(host, user, password, script) -> {code, out, err}   (password '' = use the saved SSH key)
+//   T.copyId(host, user, password) -> {code, out, err}         (ssh-keygen + ssh-copy-id)
 //   T.get(key) -> string|null     T.put(key, value)
 (function (root) {
   const BASE = 'https://www.mehranhost.cloud/api/v1';
@@ -187,51 +188,19 @@ EOF
       throw new ApiError('SSH در دسترس نشد: ' + last.slice(0, 200), 'ssh_timeout');
     }
 
-    // Runs first, right after the server accepts SSH and before AmneziaWG:
-    // makes sure openssh-server is installed, enabled at boot and running.
-    const SSHD_SCRIPT = `
-set -e
-export DEBIAN_FRONTEND=noninteractive
-# let first-boot tasks (cloud-init / unattended upgrades) release the apt lock
-timeout 300 cloud-init status --wait >/dev/null 2>&1 || true
-APT="apt-get -o DPkg::Lock::Timeout=300"
-$APT update -y
-$APT install -y openssh-server
-mkdir -p /run/sshd
-CFG=/etc/ssh/sshd_config
-cp -n $CFG $CFG.vpsm.bak 2>/dev/null || true
-# Put the two options at the very top: sshd uses the first value it sees, so
-# this also wins over drop-ins in sshd_config.d (e.g. cloud-init's).
-sed -i '/^# vpsm-begin$/,/^# vpsm-end$/d' $CFG
-{ echo '# vpsm-begin'; echo 'PermitRootLogin yes'; echo 'PasswordAuthentication yes'; echo '# vpsm-end'; cat $CFG; } > $CFG.new
-cat $CFG.new > $CFG
-rm -f $CFG.new
-if ! /usr/sbin/sshd -t; then
-  cp $CFG.vpsm.bak $CFG
-  echo SSHD_FAILED
-  exit 1
-fi
-systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
-if systemctl is-active --quiet ssh || systemctl is-active --quiet sshd; then
-  systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
-else
-  systemctl start ssh 2>/dev/null || systemctl start sshd 2>/dev/null || true
-fi
-EFF=$(/usr/sbin/sshd -T 2>/dev/null | grep -Ei '^(permitrootlogin|passwordauthentication) ' | tr '\\n' ' ')
-echo "$EFF"
-if ! { echo "$EFF" | grep -qi 'permitrootlogin yes' && echo "$EFF" | grep -qi 'passwordauthentication yes'; }; then
-  echo SSHD_CONFIG_NOT_APPLIED
-  exit 1
-fi
-if systemctl is-active --quiet ssh || systemctl is-active --quiet sshd; then echo SSHD_OK; else echo SSHD_FAILED; exit 1; fi
-`;
-
-    async function ensureSshd(ip, pw, log) {
-      log('نصب و فعال‌سازی sshd (PermitRootLogin و PasswordAuthentication روی yes)...');
-      const r = await T.ssh(ip, 'root', pw, SSHD_SCRIPT);
-      if (r.code !== 0 || r.out.indexOf('SSHD_OK') < 0)
-        throw new ApiError('نصب/فعال‌سازی sshd ناموفق بود:\n' + (r.err || r.out).slice(-600), 'sshd_failed');
-      log('sshd آماده است.');
+    // ssh-copy-id: creates (once) an SSH key pair on this device and appends its
+    // public key to /root/.ssh/authorized_keys on the server using the root password.
+    // From then on every command is run with the key (empty password = key auth),
+    // so nothing in sshd_config has to be changed on the server.
+    async function setupKey(ip, pw, log) {
+      log('ساخت کلید SSH و نصب آن روی سرور (ssh-copy-id)...');
+      const r = await T.copyId(ip, 'root', pw);
+      if (r.code !== 0)
+        throw new ApiError('ssh-copy-id ناموفق بود:\n' + (r.err || r.out || '').slice(-600), 'copyid_failed');
+      const t = await T.ssh(ip, 'root', '', 'echo ok');
+      if (t.code !== 0 || !/ok/.test(t.out))
+        throw new ApiError('ورود با کلید SSH ناموفق بود:\n' + (t.err || t.out || '').slice(-400), 'key_login_failed');
+      log('ورود با کلید SSH برقرار شد.');
     }
 
     async function installAwg(ip, pw, log) {
@@ -239,9 +208,9 @@ if systemctl is-active --quiet ssh || systemctl is-active --quiet sshd; then ech
                   h1: rnd(5, 2 ** 31), h2: rnd(5, 2 ** 31), h3: rnd(5, 2 ** 31), h4: rnd(5, 2 ** 31), ip };
       while (p.s1 + 56 === p.s2) p.s2 = rnd(15, 150);
       await waitSsh(ip, pw, log);
-      await ensureSshd(ip, pw, log);
+      await setupKey(ip, pw, log);
       log('در حال نصب AmneziaWG (چند دقیقه طول می‌کشد)...');
-      const r = await T.ssh(ip, 'root', pw, awgScript(p));
+      const r = await T.ssh(ip, 'root', '', awgScript(p));
       if (r.code !== 0 || r.out.indexOf('=====CLIENT=====') < 0)
         throw new ApiError('نصب AmneziaWG ناموفق بود:\n' + (r.err || r.out).slice(-800), 'awg_failed');
       return r.out.split('=====CLIENT=====')[1].trim() + '\n';

@@ -20,6 +20,7 @@ import android.widget.EditText;
 
 import com.jcraft.jsch.ChannelExec;
 import com.jcraft.jsch.JSch;
+import com.jcraft.jsch.KeyPair;
 import com.jcraft.jsch.Session;
 
 import org.json.JSONException;
@@ -224,6 +225,76 @@ public class MainActivity extends Activity {
             });
         }
 
+        /** Creates the SSH key pair once and keeps it in the app's private storage. */
+        private synchronized String[] ensureKey() throws Exception {
+            SharedPreferences p = prefs();
+            String priv = p.getString("ssh_priv", "");
+            String pub = p.getString("ssh_pub", "");
+            if (priv.isEmpty() || pub.isEmpty()) {
+                KeyPair kp = KeyPair.genKeyPair(new JSch(), KeyPair.RSA, 3072);
+                ByteArrayOutputStream po = new ByteArrayOutputStream();
+                ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                kp.writePrivateKey(po);
+                kp.writePublicKey(bo, "vps-manager");
+                kp.dispose();
+                priv = new String(po.toByteArray(), StandardCharsets.UTF_8);
+                pub = new String(bo.toByteArray(), StandardCharsets.UTF_8).trim();
+                p.edit().putString("ssh_priv", priv).putString("ssh_pub", pub).apply();
+            }
+            return new String[]{priv, pub};
+        }
+
+        private String runExec(Session session, String command, String stdin, int[] code, StringBuilder errOut)
+                throws Exception {
+            ChannelExec ch = (ChannelExec) session.openChannel("exec");
+            ch.setCommand(command);
+            ch.setInputStream(new ByteArrayInputStream(stdin.getBytes(StandardCharsets.UTF_8)));
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            ByteArrayOutputStream err = new ByteArrayOutputStream();
+            ch.setOutputStream(out);
+            ch.setErrStream(err);
+            ch.connect(30000);
+            long end = System.currentTimeMillis() + 15 * 60 * 1000L;
+            while (!ch.isClosed() && System.currentTimeMillis() < end) Thread.sleep(500);
+            code[0] = ch.isClosed() ? ch.getExitStatus() : -1;
+            ch.disconnect();
+            errOut.append(new String(err.toByteArray(), StandardCharsets.UTF_8));
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        }
+
+        /** ssh-copy-id: logs in with the password and appends our public key to authorized_keys. */
+        @JavascriptInterface
+        public void copyId(final String id, final String host, final String user, final String password) {
+            pool.execute(() -> {
+                String result;
+                Session session = null;
+                try {
+                    String pub = ensureKey()[1];
+                    JSch jsch = new JSch();
+                    session = jsch.getSession(user, host, 22);
+                    session.setPassword(password);
+                    session.setConfig("StrictHostKeyChecking", "no");
+                    session.setConfig("PreferredAuthentications", "password,keyboard-interactive");
+                    session.connect(30000);
+                    String script = "umask 077\n"
+                            + "mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
+                            + "touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys\n"
+                            + "grep -qxF '" + pub + "' ~/.ssh/authorized_keys || echo '" + pub + "' >> ~/.ssh/authorized_keys\n"
+                            + "(command -v restorecon >/dev/null && restorecon -R ~/.ssh) || true\n";
+                    int[] code = new int[1];
+                    StringBuilder err = new StringBuilder();
+                    String out = runExec(session, "bash -s", script, code, err);
+                    result = new JSONObject().put("code", code[0]).put("out", out).put("err", err.toString()).toString();
+                } catch (Exception e) {
+                    result = errorJson(e);
+                } finally {
+                    if (session != null) session.disconnect();
+                }
+                reply(id, result);
+            });
+        }
+
+        /** Runs a script as root. An empty password means: log in with the saved SSH key. */
         @JavascriptInterface
         public void ssh(final String id, final String host, final String user,
                         final String password, final String script) {
@@ -232,26 +303,21 @@ public class MainActivity extends Activity {
                 Session session = null;
                 try {
                     JSch jsch = new JSch();
+                    boolean useKey = password == null || password.isEmpty();
+                    if (useKey) {
+                        String[] k = ensureKey();
+                        jsch.addIdentity("vpsm", k[0].getBytes(StandardCharsets.UTF_8),
+                                k[1].getBytes(StandardCharsets.UTF_8), null);
+                    }
                     session = jsch.getSession(user, host, 22);
-                    session.setPassword(password);
+                    if (!useKey) session.setPassword(password);
                     session.setConfig("StrictHostKeyChecking", "no");
-                    session.setConfig("PreferredAuthentications", "password,keyboard-interactive");
+                    session.setConfig("PreferredAuthentications", useKey ? "publickey" : "password,keyboard-interactive");
                     session.connect(30000);
-                    ChannelExec ch = (ChannelExec) session.openChannel("exec");
-                    ch.setCommand("bash -s");
-                    ch.setInputStream(new ByteArrayInputStream(script.getBytes(StandardCharsets.UTF_8)));
-                    ByteArrayOutputStream out = new ByteArrayOutputStream();
-                    ByteArrayOutputStream err = new ByteArrayOutputStream();
-                    ch.setOutputStream(out);
-                    ch.setErrStream(err);
-                    ch.connect(30000);
-                    long end = System.currentTimeMillis() + 15 * 60 * 1000L;
-                    while (!ch.isClosed() && System.currentTimeMillis() < end) Thread.sleep(500);
-                    int code = ch.isClosed() ? ch.getExitStatus() : -1;
-                    ch.disconnect();
-                    result = new JSONObject().put("code", code)
-                            .put("out", new String(out.toByteArray(), StandardCharsets.UTF_8))
-                            .put("err", new String(err.toByteArray(), StandardCharsets.UTF_8)).toString();
+                    int[] code = new int[1];
+                    StringBuilder err = new StringBuilder();
+                    String out = runExec(session, "bash -s", script, code, err);
+                    result = new JSONObject().put("code", code[0]).put("out", out).put("err", err.toString()).toString();
                 } catch (Exception e) {
                     result = errorJson(e);
                 } finally {

@@ -25,7 +25,7 @@ APK را باید با Android SDK ساخت (در محیطی که این پرو�
 خروجی: `android/app/build/outputs/apk/debug/app-debug.apk`
 
 ## اجرای نسخه وب در Termux
-    pkg install python sshpass     # یا: pip install paramiko
+    pkg install python openssh sshpass
     python app.py
 سپس http://127.0.0.1:8080 را در مرورگر باز کنید.
 
@@ -33,4 +33,5 @@ APK را باید با Android SDK ساخت (در محیطی که این پرو�
 - هنگام ساخت سرور و نصب AmneziaWG برنامه را باز و صفحه را روشن نگه دارید (چند دقیقه طول می‌کشد).
 - کلید API باید دسترسی‌های `read`، `billing` (ساخت) و `destructive` (حذف) داشته باشد؛ اگر کلید آی‌پی مجاز دارد، آی‌پی گوشی باید در فهرست باشد.
 - نصب AmneziaWG فرض می‌کند سیستم‌عامل Ubuntu است.
-- بلافاصله بعد از ساخت سرور و قبل از نصب AmneziaWG، برنامه سرویس sshd (openssh-server) را نصب و فعال می‌کند و `PermitRootLogin yes` و `PasswordAuthentication yes` را در بالای `/etc/ssh/sshd_config` قرار می‌دهد (قبل از اعمال، پیکربندی با `sshd -t` بررسی می‌شود؛ نسخه پشتیبان در `sshd_config.vpsm.bak`). این مرحله از طریق خود SSH اجرا می‌شود، پس سرور باید از قبل پورت ۲۲ را باز داشته باشد (ایمیج‌های Ubuntu هتزنر دارند).
+- بعد از ساخت سرور، برنامه یک کلید SSH می‌سازد (فقط بار اول؛ در اندروید در حافظه خصوصی برنامه، در Termux در `~/.ssh/vpsm_ed25519`) و با `ssh-copy-id` (با رمز روت) آن را در `/root/.ssh/authorized_keys` سرور قرار می‌دهد. از آن به بعد همه‌ی دستورات با کلید SSH اجرا می‌شوند و دیگر نیازی به تغییر `PermitRootLogin` یا `PasswordAuthentication` در `sshd_config` نیست (برنامه به تنظیمات sshd دست نمی‌زند).
+- در Termux برای ssh-copy-id این بسته‌ها لازم است: `pkg install openssh sshpass`.

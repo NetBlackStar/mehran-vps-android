@@ -4,8 +4,10 @@
 All app logic lives in www/core.js + www/index.html (shared with the Android app).
 This server only serves those files and provides two helpers the browser cannot do:
   POST /native/http   -> forwards an HTTPS call to the MehranHost API (no CORS problems)
-  POST /native/ssh    -> runs a script as root over SSH (needs `pip install paramiko`
-                         or `pkg install sshpass`)
+  POST /native/copyid -> creates an SSH key (ssh-keygen) and installs it on the server
+                         with ssh-copy-id (needs `pkg install openssh sshpass`)
+  POST /native/ssh    -> runs a script as root over SSH using that key
+                         (empty password = key auth; paramiko is used if installed)
 
 Run:  python app.py     then open http://127.0.0.1:8080
 """
@@ -36,8 +38,41 @@ def forward(d):
         return {"status": e.code, "headers": {k.lower(): v for k, v in e.headers.items()}, "body": e.read().decode()}
 
 
+KEY = os.environ.get("VPSM_KEY") or os.path.join(os.path.expanduser("~"), ".ssh", "vpsm_ed25519")
+SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=20"]
+
+
+def ensure_key():
+    """Create the key pair once (ssh-keygen); reused for every server."""
+    if os.path.exists(KEY) and os.path.exists(KEY + ".pub"):
+        return
+    if not shutil.which("ssh-keygen"):
+        raise RuntimeError("Install openssh: pkg install openssh")
+    os.makedirs(os.path.dirname(KEY), mode=0o700, exist_ok=True)
+    for f in (KEY, KEY + ".pub"):
+        if os.path.exists(f):
+            os.remove(f)
+    p = subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "vps-manager", "-f", KEY],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError("ssh-keygen failed: " + (p.stderr or p.stdout))
+
+
+def copy_id(d):
+    host, user, pw = d["host"], d.get("user", "root"), d["password"]
+    ensure_key()
+    if not (shutil.which("sshpass") and shutil.which("ssh-copy-id")):
+        raise RuntimeError("Install: pkg install openssh sshpass")
+    # ssh-copy-id: appends the public key to ~/.ssh/authorized_keys on the server
+    p = subprocess.run(
+        ["sshpass", "-p", pw, "ssh-copy-id", "-i", KEY + ".pub"] + SSH_OPTS + [f"{user}@{host}"],
+        capture_output=True, text=True, timeout=120)
+    return {"code": p.returncode, "out": p.stdout, "err": p.stderr}
+
+
 def ssh(d):
-    host, user, pw, script = d["host"], d.get("user", "root"), d["password"], d["script"]
+    host, user, script = d["host"], d.get("user", "root"), d["script"]
+    ensure_key()
     try:
         import paramiko  # type: ignore
     except ImportError:
@@ -45,7 +80,7 @@ def ssh(d):
     if paramiko:
         cl = paramiko.SSHClient()
         cl.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        cl.connect(host, username=user, password=pw, timeout=30, allow_agent=False, look_for_keys=False)
+        cl.connect(host, username=user, key_filename=KEY, timeout=30, allow_agent=False, look_for_keys=False)
         stdin, stdout, stderr = cl.exec_command("bash -s", timeout=900)
         stdin.write(script)
         stdin.channel.shutdown_write()
@@ -53,11 +88,8 @@ def ssh(d):
         code = stdout.channel.recv_exit_status()
         cl.close()
         return {"code": code, "out": out, "err": err}
-    if not shutil.which("sshpass"):
-        raise RuntimeError("Install one of: pip install paramiko   or   pkg install sshpass")
     p = subprocess.run(
-        ["sshpass", "-p", pw, "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-         "-o", "ConnectTimeout=20", f"{user}@{host}", "bash -s"],
+        ["ssh", "-i", KEY, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes"] + SSH_OPTS + [f"{user}@{host}", "bash -s"],
         input=script, capture_output=True, text=True, timeout=900)
     return {"code": p.returncode, "out": p.stdout, "err": p.stderr}
 
@@ -87,6 +119,8 @@ class H(BaseHTTPRequestHandler):
             d = json.loads(self.rfile.read(n) or b"{}")
             if self.path == "/native/http":
                 return self.send(200, forward(d))
+            if self.path == "/native/copyid":
+                return self.send(200, copy_id(d))
             if self.path == "/native/ssh":
                 return self.send(200, ssh(d))
             self.send(404, {"error": "not found"})

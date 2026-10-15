@@ -91,7 +91,12 @@ function androidTransport() {
       return r;
     },
     ssh: async (host, user, pw, script) => {
-      const r = await call(id => window.Native.ssh(id, host, user, pw, script));
+      const r = await call(id => window.Native.ssh(id, host, user, pw || '', script));
+      if (r.error) throw new Error(r.error);
+      return r;
+    },
+    copyId: async (host, user, pw) => {
+      const r = await call(id => window.Native.copyId(id, host, user, pw));
       if (r.error) throw new Error(r.error);
       return r;
     },
@@ -108,7 +113,8 @@ function webTransport() {
     get: k => localStorage.getItem('vpsm_' + k),
     put: (k, v) => localStorage.setItem('vpsm_' + k, v),
     http: (method, url, headers, body) => post('/native/http', { method, url, headers, body }),
-    ssh: (host, user, password, script) => post('/native/ssh', { host, user, password, script }),
+    ssh: (host, user, password, script) => post('/native/ssh', { host, user, password: password || '', script }),
+    copyId: (host, user, password) => post('/native/copyid', { host, user, password }),
   };
 }
 const T = window.Native ? androidTransport() : webTransport();
